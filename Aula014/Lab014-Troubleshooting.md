@@ -1,290 +1,564 @@
-# Troubleshooting Lab 14 - CI/CD com GitHub Actions
+# Lab014-Troubleshooting - Deploy Strategies e Monitoramento
 
-**Lab:** 014 - CI/CD com GitHub Actions  
-**Foco:** Pipelines, deploy automatizado, integração contínua
+**Disciplina:** Implementação de Sistemas  
+**Curso:** Análise e Desenvolvimento de Sistemas - UniFAAT  
+**Professor:** Alexandre Tavares  
 
----
+## 🚨 Problemas Comuns e Soluções
 
-## 🚨 Problemas Mais Comuns
+### 1. Problemas de Blue/Green Deployment
 
-### 1. Workflow não Executa
+#### ❌ **Problema**: Target Group não fica healthy
+```
+Target health check failed: Connection refused
+```
 
-#### **Sintoma:**
-- Push/PR não dispara workflow
-- Actions tab vazio
-
-#### **Diagnóstico:**
+#### ✅ **Solução**:
 ```bash
-# Verifica se arquivo está no local correto
-ls -la .github/workflows/
+# Verificar se aplicação está rodando na porta correta
+docker ps
+docker logs container-id
 
-# Verifica sintaxe YAML
-cat .github/workflows/deploy.yml | python -c "import yaml, sys; yaml.safe_load(sys.stdin)"
+# Verificar security groups
+aws ec2 describe-security-groups --group-ids sg-12345678
+
+# Testar conectividade local
+curl -f http://localhost:3000/health
+
+# Verificar configuração do target group
+aws elbv2 describe-target-health --target-group-arn $TARGET_GROUP_ARN
 ```
 
-#### **Soluções:**
-```yaml
-# Corrige triggers no workflow
-name: Deploy
-on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Deploy
-        run: echo "Deploying..."
+#### ❌ **Problema**: Switch de tráfego não funciona
+```
+Error: Listener rule not found
 ```
 
-### 2. Secrets não Funcionam
+#### ✅ **Solução**:
+```bash
+# Verificar se listener existe
+aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN
 
-#### **Sintoma:**
-- "Secret not found"
-- Variáveis de ambiente vazias
+# Verificar regras do listener
+aws elbv2 describe-rules --listener-arn $LISTENER_ARN
 
-#### **Soluções:**
-```yaml
-# Usa secrets corretamente
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Configure AWS
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: |
-          aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
-          aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+# Recriar listener se necessário
+aws elbv2 create-listener \
+    --load-balancer-arn $ALB_ARN \
+    --protocol HTTP \
+    --port 80 \
+    --default-actions Type=forward,TargetGroupArn=$BLUE_TG_ARN
 ```
 
-**Configurar secrets no GitHub:**
-1. Repository → Settings → Secrets and variables → Actions
-2. New repository secret
-3. Adicionar: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+### 2. Problemas de Canary Deployment
 
-### 3. Build Falha
-
-#### **Sintoma:**
-- "npm install failed"
-- "docker build failed"
-
-#### **Diagnóstico:**
-```yaml
-# Adiciona debug no workflow
-- name: Debug
-  run: |
-    pwd
-    ls -la
-    node --version
-    npm --version
+#### ❌ **Problema**: Distribuição de tráfego incorreta
+```
+All traffic going to one target group despite weights
 ```
 
-#### **Soluções:**
-```yaml
-# Corrige dependências Node.js
-- name: Setup Node.js
-  uses: actions/setup-node@v3
-  with:
-    node-version: '18'
-    cache: 'npm'
+#### ✅ **Solução**:
+```bash
+# Verificar configuração de pesos
+aws elbv2 describe-rules --listener-arn $LISTENER_ARN
 
-- name: Install dependencies
-  run: npm ci
+# Atualizar regra com pesos corretos
+aws elbv2 modify-rule \
+    --rule-arn $RULE_ARN \
+    --actions Type=forward,ForwardConfig='{
+        "TargetGroups": [
+            {
+                "TargetGroupArn": "'$BLUE_TG_ARN'",
+                "Weight": 90
+            },
+            {
+                "TargetGroupArn": "'$GREEN_TG_ARN'",
+                "Weight": 10
+            }
+        ]
+    }'
 
-- name: Build
-  run: npm run build
-
-# Corrige build Docker
-- name: Build Docker image
-  run: |
-    docker build -t myapp:${{ github.sha }} .
-    docker tag myapp:${{ github.sha }} myapp:latest
+# Verificar se ambos target groups têm targets healthy
+aws elbv2 describe-target-health --target-group-arn $BLUE_TG_ARN
+aws elbv2 describe-target-health --target-group-arn $GREEN_TG_ARN
 ```
 
-### 4. Deploy para AWS Falha
-
-#### **Sintoma:**
-- "AccessDenied" durante deploy
-- "InvalidParameterValue" errors
-
-#### **Soluções:**
-```yaml
-# Configura AWS credentials corretamente
-- name: Configure AWS credentials
-  uses: aws-actions/configure-aws-credentials@v2
-  with:
-    aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-    aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-    aws-region: us-east-1
-
-# Deploy para S3
-- name: Deploy to S3
-  run: |
-    aws s3 sync ./build s3://meu-bucket --delete
-
-# Deploy para EC2
-- name: Deploy to EC2
-  run: |
-    echo "${{ secrets.EC2_SSH_KEY }}" > private_key.pem
-    chmod 600 private_key.pem
-    scp -i private_key.pem -o StrictHostKeyChecking=no ./app.zip ec2-user@${{ secrets.EC2_HOST }}:/tmp/
-    ssh -i private_key.pem -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_HOST }} '
-      cd /var/www/html
-      sudo unzip -o /tmp/app.zip
-      sudo systemctl restart nginx
-    '
+#### ❌ **Problema**: Sticky sessions interferindo no Canary
+```
+Users always hitting same version
 ```
 
-### 5. Testes Falham
+#### ✅ **Solução**:
+```bash
+# Desabilitar sticky sessions durante Canary
+aws elbv2 modify-target-group-attributes \
+    --target-group-arn $TARGET_GROUP_ARN \
+    --attributes Key=stickiness.enabled,Value=false
 
-#### **Sintoma:**
-- Unit tests não passam
-- Coverage insuficiente
-
-#### **Soluções:**
-```yaml
-# Adiciona step de testes
-- name: Run tests
-  run: |
-    npm test
-    npm run test:coverage
-
-# Configura ambiente de teste
-- name: Setup test environment
-  run: |
-    cp .env.example .env.test
-    npm run db:migrate:test
-
-# Usa services para banco de dados
-services:
-  postgres:
-    image: postgres:13
-    env:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: test_db
-    options: >-
-      --health-cmd pg_isready
-      --health-interval 10s
-      --health-timeout 5s
-      --health-retries 5
+# Ou configurar duração menor
+aws elbv2 modify-target-group-attributes \
+    --target-group-arn $TARGET_GROUP_ARN \
+    --attributes Key=stickiness.lb_cookie.duration_seconds,Value=60
 ```
 
-### 6. Workflow Muito Lento
+### 3. Problemas de CloudWatch Metrics
 
-#### **Sintoma:**
-- Build demora mais de 10 minutos
-- Timeout em steps
-
-#### **Soluções:**
-```yaml
-# Usa cache para dependências
-- name: Cache node modules
-  uses: actions/cache@v3
-  with:
-    path: ~/.npm
-    key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-    restore-keys: |
-      ${{ runner.os }}-node-
-
-# Paraleliza jobs
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Run tests
-        run: npm test
-  
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Build
-        run: npm run build
-  
-  deploy:
-    needs: [test, build]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy
-        run: echo "Deploying..."
+#### ❌ **Problema**: Métricas customizadas não aparecem
+```javascript
+// Código problemático
+cloudwatch.putMetricData(params, (err, data) => {
+    // Erro não tratado
+});
 ```
 
-### 7. Rollback não Funciona
-
-#### **Sintoma:**
-- Deploy com erro não reverte
-- Versão anterior não restaura
-
-#### **Soluções:**
-```yaml
-# Implementa rollback automático
-- name: Deploy with rollback
-  run: |
-    # Backup da versão atual
-    aws s3 sync s3://meu-bucket s3://meu-bucket-backup/$(date +%Y%m%d-%H%M%S) --delete
+#### ✅ **Solução**:
+```javascript
+// Código corrigido
+try {
+    await cloudwatch.putMetricData(params).promise();
+    console.log('Metric sent successfully');
+} catch (error) {
+    console.error('Error sending metric:', error);
     
-    # Deploy nova versão
-    aws s3 sync ./build s3://meu-bucket --delete
-    
-    # Testa se deploy funcionou
-    if ! curl -f https://meusite.com/health; then
-      echo "Deploy failed, rolling back..."
-      aws s3 sync s3://meu-bucket-backup/latest s3://meu-bucket --delete
-      exit 1
-    fi
+    // Verificar permissões IAM
+    if (error.code === 'AccessDenied') {
+        console.error('Check IAM permissions for cloudwatch:PutMetricData');
+    }
+}
 
-# Usa Blue-Green deployment
-- name: Blue-Green Deploy
-  run: |
-    # Deploy para ambiente green
-    aws s3 sync ./build s3://meu-bucket-green --delete
-    
-    # Testa ambiente green
-    if curl -f https://green.meusite.com/health; then
-      # Troca DNS para green
-      aws route53 change-resource-record-sets --hosted-zone-id Z123 --change-batch file://switch-to-green.json
-    else
-      echo "Green environment failed health check"
-      exit 1
-    fi
+// Verificar se namespace está correto
+const params = {
+    Namespace: 'ECommerce/App', // Não usar caracteres especiais
+    MetricData: [{
+        MetricName: 'RequestCount',
+        Value: 1,
+        Unit: 'Count',
+        Timestamp: new Date() // Timestamp obrigatório
+    }]
+};
 ```
 
-### 8. Notificações não Funcionam
-
-#### **Sintoma:**
-- Não recebe notificação de falha
-- Slack/Discord não notifica
-
-#### **Soluções:**
-```yaml
-# Adiciona notificação Slack
-- name: Notify Slack on failure
-  if: failure()
-  uses: 8398a7/action-slack@v3
-  with:
-    status: failure
-    channel: '#deployments'
-    webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-
-# Notificação por email
-- name: Send email on failure
-  if: failure()
-  uses: dawidd6/action-send-mail@v3
-  with:
-    server_address: smtp.gmail.com
-    server_port: 587
-    username: ${{ secrets.EMAIL_USERNAME }}
-    password: ${{ secrets.EMAIL_PASSWORD }}
-    subject: "Deploy Failed: ${{ github.repository }}"
-    body: "Deploy failed for commit ${{ github.sha }}"
-    to: admin@meusite.com
+#### ❌ **Problema**: Métricas com delay excessivo
 ```
+Metrics appearing 5-10 minutes late
+```
+
+#### ✅ **Solução**:
+```javascript
+// Enviar métricas em batch para reduzir delay
+class MetricsBatcher {
+    constructor() {
+        this.batch = [];
+        this.batchSize = 20; // Máximo 20 métricas por request
+        this.flushInterval = 30000; // Flush a cada 30 segundos
+        
+        setInterval(() => this.flush(), this.flushInterval);
+    }
+    
+    addMetric(metricData) {
+        this.batch.push(metricData);
+        
+        if (this.batch.length >= this.batchSize) {
+            this.flush();
+        }
+    }
+    
+    async flush() {
+        if (this.batch.length === 0) return;
+        
+        const params = {
+            Namespace: 'ECommerce/App',
+            MetricData: this.batch.splice(0, this.batchSize)
+        };
+        
+        try {
+            await cloudwatch.putMetricData(params).promise();
+        } catch (error) {
+            console.error('Error flushing metrics:', error);
+        }
+    }
+}
+```
+
+### 4. Problemas de CloudWatch Alarms
+
+#### ❌ **Problema**: Alarmes não disparando
+```
+Alarm stays in INSUFFICIENT_DATA state
+```
+
+#### ✅ **Solução**:
+```bash
+# Verificar se métricas estão sendo enviadas
+aws cloudwatch get-metric-statistics \
+    --namespace ECommerce/App \
+    --metric-name ErrorCount \
+    --start-time 2024-01-15T10:00:00Z \
+    --end-time 2024-01-15T11:00:00Z \
+    --period 300 \
+    --statistics Sum
+
+# Verificar configuração do alarme
+aws cloudwatch describe-alarms --alarm-names "ECommerce-HighErrorRate"
+
+# Ajustar treat-missing-data
+aws cloudwatch put-metric-alarm \
+    --alarm-name "ECommerce-HighErrorRate" \
+    --treat-missing-data notBreaching
+```
+
+#### ❌ **Problema**: Alarmes com falsos positivos
+```
+Alarms triggering during normal traffic spikes
+```
+
+#### ✅ **Solução**:
+```bash
+# Usar anomaly detection em vez de threshold fixo
+aws cloudwatch put-anomaly-detector \
+    --namespace ECommerce/App \
+    --metric-name ResponseTime \
+    --stat Average
+
+# Criar alarme baseado em anomalia
+aws cloudwatch put-metric-alarm \
+    --alarm-name "ECommerce-ResponseTime-Anomaly" \
+    --comparison-operator LessThanLowerOrGreaterThanUpperThreshold \
+    --evaluation-periods 2 \
+    --metrics '[
+        {
+            "Id": "m1",
+            "MetricStat": {
+                "Metric": {
+                    "Namespace": "ECommerce/App",
+                    "MetricName": "ResponseTime"
+                },
+                "Period": 300,
+                "Stat": "Average"
+            }
+        },
+        {
+            "Id": "ad1",
+            "Expression": "ANOMALY_DETECTION_FUNCTION(m1, 2)"
+        }
+    ]' \
+    --threshold-metric-id ad1
+```
+
+### 5. Problemas de Rollback
+
+#### ❌ **Problema**: Rollback não funciona automaticamente
+```
+Lambda function timeout during rollback
+```
+
+#### ✅ **Solução**:
+```python
+# Aumentar timeout da função Lambda
+import boto3
+import json
+from botocore.exceptions import ClientError
+
+def lambda_handler(event, context):
+    # Configurar timeout maior
+    context.get_remaining_time_in_millis()
+    
+    try:
+        # Implementar rollback com retry
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                perform_rollback()
+                break
+            except ClientError as e:
+                if attempt == max_retries - 1:
+                    raise
+                print(f"Rollback attempt {attempt + 1} failed, retrying...")
+                time.sleep(5)
+                
+    except Exception as e:
+        # Enviar notificação de falha
+        send_failure_notification(str(e))
+        raise
+
+def perform_rollback():
+    elbv2 = boto3.client('elbv2')
+    
+    # Verificar estado atual antes do rollback
+    current_targets = elbv2.describe_target_health(
+        TargetGroupArn=os.environ['GREEN_TARGET_GROUP_ARN']
+    )
+    
+    # Só fazer rollback se green estiver unhealthy
+    unhealthy_count = sum(1 for target in current_targets['TargetHealthDescriptions'] 
+                         if target['TargetHealth']['State'] != 'healthy')
+    
+    if unhealthy_count > 0:
+        elbv2.modify_listener(
+            ListenerArn=os.environ['LISTENER_ARN'],
+            DefaultActions=[{
+                'Type': 'forward',
+                'TargetGroupArn': os.environ['BLUE_TARGET_GROUP_ARN']
+            }]
+        )
+```
+
+#### ❌ **Problema**: Rollback parcial em Canary
+```
+Traffic not fully rolled back to stable version
+```
+
+#### ✅ **Solução**:
+```bash
+# Script de rollback completo
+#!/bin/bash
+rollback_canary() {
+    echo "Rolling back Canary deployment..."
+    
+    # Primeiro, redirecionar 100% para blue
+    aws elbv2 modify-rule \
+        --rule-arn $RULE_ARN \
+        --actions Type=forward,ForwardConfig='{
+            "TargetGroups": [
+                {
+                    "TargetGroupArn": "'$BLUE_TG_ARN'",
+                    "Weight": 100
+                },
+                {
+                    "TargetGroupArn": "'$GREEN_TG_ARN'",
+                    "Weight": 0
+                }
+            ]
+        }'
+    
+    # Aguardar propagação
+    sleep 30
+    
+    # Verificar se tráfego foi redirecionado
+    for i in {1..10}; do
+        response=$(curl -s http://your-app.com/)
+        version=$(echo $response | jq -r '.version')
+        
+        if [ "$version" != "1.0.0" ]; then
+            echo "Warning: Still receiving traffic from new version"
+            sleep 10
+        else
+            echo "Rollback successful - all traffic on stable version"
+            break
+        fi
+    done
+}
+```
+
+### 6. Problemas de Load Balancer
+
+#### ❌ **Problema**: Health checks falhando intermitentemente
+```
+Target alternating between healthy and unhealthy
+```
+
+#### ✅ **Solução**:
+```bash
+# Ajustar configurações de health check
+aws elbv2 modify-target-group \
+    --target-group-arn $TARGET_GROUP_ARN \
+    --health-check-interval-seconds 30 \
+    --health-check-timeout-seconds 10 \
+    --healthy-threshold-count 3 \
+    --unhealthy-threshold-count 3 \
+    --health-check-path /health
+
+# Implementar health check mais robusto
+app.get('/health', async (req, res) => {
+    const checks = {
+        database: await checkDatabase(),
+        redis: await checkRedis(),
+        memory: checkMemoryUsage(),
+        disk: checkDiskSpace()
+    };
+    
+    const allHealthy = Object.values(checks).every(check => check.healthy);
+    
+    if (allHealthy) {
+        res.status(200).json({
+            status: 'healthy',
+            checks: checks,
+            timestamp: new Date().toISOString()
+        });
+    } else {
+        res.status(503).json({
+            status: 'unhealthy',
+            checks: checks,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+```
+
+#### ❌ **Problema**: SSL/TLS certificate issues
+```
+SSL certificate verification failed
+```
+
+#### ✅ **Solução**:
+```bash
+# Verificar certificado SSL
+aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN
+
+# Adicionar certificado SSL
+aws elbv2 create-listener \
+    --load-balancer-arn $ALB_ARN \
+    --protocol HTTPS \
+    --port 443 \
+    --certificates CertificateArn=arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012 \
+    --ssl-policy ELBSecurityPolicy-TLS-1-2-2017-01 \
+    --default-actions Type=forward,TargetGroupArn=$BLUE_TG_ARN
+```
+
+## 🔍 Comandos de Debugging
+
+### Verificar Status dos Recursos
+
+```bash
+# Status do Load Balancer
+aws elbv2 describe-load-balancers --names ecommerce-alb
+
+# Status dos Target Groups
+aws elbv2 describe-target-groups --names ecommerce-blue ecommerce-green
+
+# Health dos targets
+aws elbv2 describe-target-health --target-group-arn $TARGET_GROUP_ARN
+
+# Status dos alarmes
+aws cloudwatch describe-alarms --state-value ALARM
+
+# Métricas recentes
+aws cloudwatch get-metric-statistics \
+    --namespace ECommerce/App \
+    --metric-name RequestCount \
+    --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+    --period 300 \
+    --statistics Sum
+```
+
+### Testar Conectividade
+
+```bash
+# Testar health check endpoint
+curl -v http://your-alb-dns/health
+
+# Testar com diferentes User-Agents (para Canary)
+curl -H "User-Agent: TestClient/1.0" http://your-alb-dns/
+
+# Testar SSL
+curl -v https://your-alb-dns/
+
+# Verificar DNS resolution
+nslookup your-alb-dns
+dig your-alb-dns
+```
+
+### Monitorar Logs
+
+```bash
+# Logs do Application Load Balancer
+aws s3 sync s3://your-alb-logs-bucket/ ./alb-logs/
+
+# Logs de aplicação (se usando ECS)
+aws logs tail /ecs/your-app --follow
+
+# Logs do Lambda (rollback function)
+aws logs tail /aws/lambda/rollback-function --follow
+```
+
+## 📊 Métricas Importantes para Monitorar
+
+### Application Load Balancer
+- **RequestCount**: Número total de requisições
+- **TargetResponseTime**: Tempo de resposta dos targets
+- **HTTPCode_Target_4XX_Count**: Erros 4xx dos targets
+- **HTTPCode_Target_5XX_Count**: Erros 5xx dos targets
+- **HealthyHostCount**: Número de hosts saudáveis
+- **UnHealthyHostCount**: Número de hosts não saudáveis
+
+### Aplicação
+- **RequestCount**: Requisições por endpoint
+- **ResponseTime**: Tempo de resposta por endpoint
+- **ErrorCount**: Número de erros por tipo
+- **ActiveConnections**: Conexões ativas
+- **MemoryUtilization**: Uso de memória
+- **CPUUtilization**: Uso de CPU
+
+### Deployment
+- **DeploymentDuration**: Tempo total de deployment
+- **RollbackCount**: Número de rollbacks
+- **CanarySuccessRate**: Taxa de sucesso do Canary
+- **HealthCheckFailures**: Falhas de health check
+
+## 🛠️ Ferramentas de Debug
+
+### AWS CLI
+```bash
+# Configurar output em tabela para melhor visualização
+aws configure set output table
+
+# Usar queries JMESPath para filtrar resultados
+aws elbv2 describe-target-health \
+    --target-group-arn $TG_ARN \
+    --query 'TargetHealthDescriptions[?TargetHealth.State!=`healthy`]'
+```
+
+### Scripts de Monitoramento
+```bash
+#!/bin/bash
+# monitor-deployment.sh
+
+while true; do
+    echo "=== $(date) ==="
+    
+    # Check target health
+    aws elbv2 describe-target-health --target-group-arn $GREEN_TG_ARN \
+        --query 'TargetHealthDescriptions[].{Target:Target.Id,State:TargetHealth.State}' \
+        --output table
+    
+    # Check alarms
+    aws cloudwatch describe-alarms \
+        --query 'MetricAlarms[?StateValue==`ALARM`].{Name:AlarmName,State:StateValue}' \
+        --output table
+    
+    sleep 30
+done
+```
+
+### Postman/Insomnia
+- Criar collection para testar endpoints
+- Configurar testes automatizados
+- Monitorar response times
+- Validar headers e status codes
+
+## 📋 Checklist de Troubleshooting
+
+### Antes de Reportar Problema:
+
+- [ ] Verificar logs da aplicação
+- [ ] Confirmar health checks passando
+- [ ] Verificar métricas CloudWatch
+- [ ] Testar conectividade manual
+- [ ] Confirmar configuração do Load Balancer
+- [ ] Verificar permissões IAM
+- [ ] Testar rollback manual
+- [ ] Verificar alarmes CloudWatch
+
+### Informações para Suporte:
+
+1. **ARNs** dos recursos envolvidos
+2. **Logs** completos do período do problema
+3. **Métricas** CloudWatch relevantes
+4. **Configuração** atual vs esperada
+5. **Timeline** dos eventos
+6. **Testes** realizados
 
 ---
 
-**Desenvolvido por:** Professor Alexandre Tavares - UniFAAT
+**Lembre-se**: Deployment strategies são sobre reduzir riscos. Sempre tenha um plano de rollback testado! 🔧

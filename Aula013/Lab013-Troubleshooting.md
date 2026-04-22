@@ -1,260 +1,431 @@
-# Troubleshooting Lab 13 - Lambda e Serverless
+# Lab013-Troubleshooting - Soluções para Lambda e API Gateway
 
-**Lab:** 013 - Lambda e Serverless  
-**Foco:** Funções Lambda, triggers, API Gateway
+**Disciplina:** Implementação de Sistemas  
+**Curso:** Análise e Desenvolvimento de Sistemas - UniFAAT  
+**Professor:** Alexandre Tavares  
 
----
+## 🚨 Problemas Comuns e Soluções
 
-## 🚨 Problemas Mais Comuns
+### 1. Problemas de Permissões IAM
 
-### 1. Função Lambda não Executa
-
-#### **Sintoma:**
-- Função não é invocada
-- "Function not found" error
-
-#### **Diagnóstico:**
-```bash
-# Verifica se função existe
-aws lambda list-functions
-
-# Testa invocação manual
-aws lambda invoke \
-  --function-name minha-funcao \
-  --payload '{"test": "data"}' \
-  response.json
-
-# Verifica logs
-aws logs describe-log-groups --log-group-name-prefix /aws/lambda/minha-funcao
+#### ❌ **Problema**: AccessDenied ao executar função Lambda
+```
+{
+  "errorType": "AccessDenied",
+  "errorMessage": "User: arn:aws:sts::123456789012:assumed-role/lambda-role is not authorized to perform: dynamodb:PutItem"
+}
 ```
 
-#### **Soluções:**
+#### ✅ **Solução**:
 ```bash
-# Verifica configuração da função
-aws lambda get-function --function-name minha-funcao
+# Verificar políticas anexadas à role
+aws iam list-attached-role-policies --role-name lambda-dynamodb-role
 
-# Atualiza código da função
-zip function.zip index.js
-aws lambda update-function-code \
-  --function-name minha-funcao \
-  --zip-file fileb://function.zip
-```
-
-### 2. Timeout da Função
-
-#### **Sintoma:**
-- "Task timed out after X seconds"
-- Função para no meio da execução
-
-#### **Soluções:**
-```bash
-# Aumenta timeout (máximo 15 minutos)
-aws lambda update-function-configuration \
-  --function-name minha-funcao \
-  --timeout 300
-
-# Otimiza código para ser mais rápido
-# Usa conexões persistentes
-# Evita operações síncronas demoradas
-```
-
-### 3. Erro de Permissões
-
-#### **Sintoma:**
-- "AccessDenied" em recursos AWS
-- "User is not authorized to perform"
-
-#### **Soluções:**
-```bash
-# Verifica role da função
-aws lambda get-function --function-name minha-funcao \
-  --query 'Configuration.Role'
-
-# Adiciona permissões ao role
+# Anexar política necessária
 aws iam attach-role-policy \
-  --role-name lambda-execution-role \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    --role-name lambda-dynamodb-role \
+    --policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
 
-# Cria policy customizada
-aws iam create-policy \
-  --policy-name LambdaS3Access \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject"],
-      "Resource": "arn:aws:s3:::meu-bucket/*"
-    }]
-  }'
+# Verificar trust policy da role
+aws iam get-role --role-name lambda-dynamodb-role
 ```
 
-### 4. API Gateway não Funciona
-
-#### **Sintoma:**
-- "Internal Server Error" (500)
-- "Missing Authentication Token" (403)
-
-#### **Diagnóstico:**
-```bash
-# Verifica API Gateway
-aws apigateway get-rest-apis
-
-# Testa endpoint
-curl -X GET https://api-id.execute-api.region.amazonaws.com/stage/resource
-
-# Verifica logs do API Gateway
-aws logs describe-log-groups --log-group-name-prefix API-Gateway-Execution-Logs
+#### ❌ **Problema**: API Gateway não consegue invocar Lambda
+```
+{
+  "message": "Internal server error"
+}
 ```
 
-#### **Soluções:**
+#### ✅ **Solução**:
 ```bash
-# Habilita logs no API Gateway
-aws apigateway update-stage \
-  --rest-api-id api-id \
-  --stage-name prod \
-  --patch-ops op=replace,path=/accessLogSettings/destinationArn,value=arn:aws:logs:region:account:log-group:api-gateway-logs
+# Adicionar permissão para API Gateway invocar Lambda
+aws lambda add-permission \
+    --function-name createTask \
+    --statement-id apigateway-invoke \
+    --action lambda:InvokeFunction \
+    --principal apigateway.amazonaws.com \
+    --source-arn "arn:aws:execute-api:REGION:ACCOUNT:API_ID/*/*"
 
-# Redeploy da API
-aws apigateway create-deployment \
-  --rest-api-id api-id \
-  --stage-name prod
-
-# Verifica integração com Lambda
-aws apigateway get-integration \
-  --rest-api-id api-id \
-  --resource-id resource-id \
-  --http-method GET
+# Verificar permissões da função
+aws lambda get-policy --function-name createTask
 ```
 
-### 5. Variáveis de Ambiente não Funcionam
+### 2. Problemas de Configuração Lambda
 
-#### **Sintoma:**
-- process.env.VARIABLE retorna undefined
-- Configuração não é lida
+#### ❌ **Problema**: Timeout da função Lambda
+```
+{
+  "errorType": "Task timed out after 3.00 seconds"
+}
+```
 
-#### **Soluções:**
+#### ✅ **Solução**:
 ```bash
-# Define variáveis de ambiente
+# Aumentar timeout da função
 aws lambda update-function-configuration \
-  --function-name minha-funcao \
-  --environment Variables='{
-    "DB_HOST": "database.amazonaws.com",
-    "DB_NAME": "mydb",
-    "API_KEY": "secret-key"
-  }'
+    --function-name createTask \
+    --timeout 30
 
-# Verifica variáveis definidas
-aws lambda get-function-configuration \
-  --function-name minha-funcao \
-  --query 'Environment'
+# Verificar configuração atual
+aws lambda get-function-configuration --function-name createTask
 ```
 
-### 6. Cold Start Lento
+#### ❌ **Problema**: Memória insuficiente
+```
+{
+  "errorType": "Runtime.OutOfMemory",
+  "errorMessage": "RequestId: abc123 Process exited before completing request"
+}
+```
 
-#### **Sintoma:**
-- Primeira invocação demora muito
-- Timeout em funções raramente usadas
-
-#### **Soluções:**
+#### ✅ **Solução**:
 ```bash
-# Aumenta memória (melhora CPU também)
+# Aumentar memória da função
 aws lambda update-function-configuration \
-  --function-name minha-funcao \
-  --memory-size 512
+    --function-name createTask \
+    --memory-size 512
 
-# Configura Provisioned Concurrency
-aws lambda put-provisioned-concurrency-config \
-  --function-name minha-funcao \
-  --qualifier $LATEST \
-  --provisioned-concurrency-config ProvisionedConcurrencyConfigs=10
-
-# Otimiza código:
-# - Inicializa conexões fora do handler
-# - Use linguagens com cold start mais rápido (Python, Node.js)
-# - Minimize dependências
+# Monitorar uso de memória no CloudWatch
+aws logs filter-log-events \
+    --log-group-name /aws/lambda/createTask \
+    --filter-pattern "REPORT"
 ```
 
-### 7. Erro de Payload
+### 3. Problemas de Código
 
-#### **Sintoma:**
-- "Invalid request body"
-- JSON parsing errors
+#### ❌ **Problema**: Erro de parsing JSON
+```javascript
+// Código problemático
+const body = JSON.parse(event.body);
+```
 
-#### **Soluções:**
+#### ✅ **Solução**:
+```javascript
+// Código corrigido com tratamento de erro
+let body;
+try {
+    body = JSON.parse(event.body || '{}');
+} catch (error) {
+    return {
+        statusCode: 400,
+        body: JSON.stringify({
+            error: 'Invalid JSON in request body'
+        })
+    };
+}
+```
+
+#### ❌ **Problema**: Variáveis de ambiente não definidas
+```javascript
+// Código problemático
+const tableName = process.env.TABLE_NAME; // undefined
+```
+
+#### ✅ **Solução**:
 ```bash
-# Testa payload manualmente
-aws lambda invoke \
-  --function-name minha-funcao \
-  --payload '{"key": "value"}' \
-  --cli-binary-format raw-in-base64-out \
-  response.json
+# Definir variável de ambiente
+aws lambda update-function-configuration \
+    --function-name createTask \
+    --environment Variables='{TABLE_NAME=Tasks}'
+```
 
-# Verifica formato esperado no código
-# Exemplo Node.js:
-cat << EOF > index.js
-exports.handler = async (event) => {
-    console.log('Event:', JSON.stringify(event, null, 2));
-    
-    try {
-        // Processa event aqui
-        const response = {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: 'Success',
-                input: event
-            })
-        };
-        return response;
-    } catch (error) {
-        console.error('Error:', error);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({
-                error: error.message
-            })
-        };
-    }
+```javascript
+// Código corrigido
+const tableName = process.env.TABLE_NAME || 'Tasks';
+```
+
+### 4. Problemas de API Gateway
+
+#### ❌ **Problema**: CORS não configurado
+```
+Access to fetch at 'https://api.example.com/tasks' from origin 'http://localhost:3000' 
+has been blocked by CORS policy
+```
+
+#### ✅ **Solução**:
+```bash
+# Habilitar CORS via CLI (método manual)
+aws apigateway put-method-response \
+    --rest-api-id $API_ID \
+    --resource-id $RESOURCE_ID \
+    --http-method POST \
+    --status-code 200 \
+    --response-parameters method.response.header.Access-Control-Allow-Origin=false
+
+# Ou configurar no código Lambda
+return {
+    statusCode: 200,
+    headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE'
+    },
+    body: JSON.stringify(data)
 };
-EOF
 ```
 
-### 8. Logs não Aparecem
+#### ❌ **Problema**: Parâmetros de path não capturados
+```
+{
+  "pathParameters": null
+}
+```
 
-#### **Sintoma:**
-- CloudWatch Logs vazio
-- console.log não aparece
-
-#### **Soluções:**
+#### ✅ **Solução**:
 ```bash
-# Verifica se log group existe
-aws logs describe-log-groups --log-group-name-prefix /aws/lambda/minha-funcao
+# Verificar configuração do recurso
+aws apigateway get-resource --rest-api-id $API_ID --resource-id $RESOURCE_ID
 
-# Cria log group se necessário
-aws logs create-log-group --log-group-name /aws/lambda/minha-funcao
-
-# Verifica permissões do role
-aws iam get-role-policy \
-  --role-name lambda-execution-role \
-  --policy-name lambda-logs-policy
-
-# Adiciona permissões de logs
-aws iam put-role-policy \
-  --role-name lambda-execution-role \
-  --policy-name lambda-logs-policy \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      "Resource": "arn:aws:logs:*:*:*"
-    }]
-  }'
+# Recriar recurso com parâmetro correto
+aws apigateway create-resource \
+    --rest-api-id $API_ID \
+    --parent-id $PARENT_ID \
+    --path-part '{taskId}'
 ```
+
+### 5. Problemas de DynamoDB
+
+#### ❌ **Problema**: Tabela não existe
+```
+{
+  "errorType": "ResourceNotFoundException",
+  "errorMessage": "Requested resource not found"
+}
+```
+
+#### ✅ **Solução**:
+```bash
+# Verificar se tabela existe
+aws dynamodb describe-table --table-name Tasks
+
+# Criar tabela se não existir
+aws dynamodb create-table \
+    --table-name Tasks \
+    --attribute-definitions AttributeName=taskId,AttributeType=S \
+    --key-schema AttributeName=taskId,KeyType=HASH \
+    --billing-mode PAY_PER_REQUEST
+```
+
+#### ❌ **Problema**: Chave primária incorreta
+```
+{
+  "errorType": "ValidationException",
+  "errorMessage": "One of the required keys was not given a value: taskId"
+}
+```
+
+#### ✅ **Solução**:
+```javascript
+// Verificar se chave está presente
+if (!taskId) {
+    return {
+        statusCode: 400,
+        body: JSON.stringify({
+            error: 'taskId is required'
+        })
+    };
+}
+
+// Usar chave correta na operação
+await dynamodb.get({
+    TableName: 'Tasks',
+    Key: { taskId: taskId }  // Certifique-se que a chave está correta
+}).promise();
+```
+
+### 6. Problemas de Deploy
+
+#### ❌ **Problema**: Função não atualizada após deploy
+```bash
+# Deploy não reflete mudanças no código
+```
+
+#### ✅ **Solução**:
+```bash
+# Recriar pacote ZIP
+cd lambda-functions/createTask
+zip -r createTask.zip . -x "*.git*" "node_modules/.cache/*"
+
+# Atualizar código da função
+aws lambda update-function-code \
+    --function-name createTask \
+    --zip-file fileb://createTask.zip
+
+# Verificar última modificação
+aws lambda get-function --function-name createTask
+```
+
+#### ❌ **Problema**: Dependências não incluídas no pacote
+```
+{
+  "errorType": "Runtime.ImportModuleError",
+  "errorMessage": "Unable to import module 'index': No module named 'uuid'"
+}
+```
+
+#### ✅ **Solução**:
+```bash
+# Instalar dependências localmente
+npm install
+
+# Verificar se node_modules está no ZIP
+zip -r function.zip . -x "*.git*"
+unzip -l function.zip | grep node_modules
+
+# Recriar pacote incluindo dependências
+rm -rf node_modules
+npm install --production
+zip -r function.zip .
+```
+
+### 7. Problemas de Monitoramento
+
+#### ❌ **Problema**: Logs não aparecem no CloudWatch
+```bash
+# Logs da função não são exibidos
+```
+
+#### ✅ **Solução**:
+```bash
+# Verificar se role tem permissão para logs
+aws iam attach-role-policy \
+    --role-name lambda-dynamodb-role \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Verificar log group
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/
+
+# Forçar criação de logs no código
+console.log('Function started:', JSON.stringify(event));
+```
+
+#### ❌ **Problema**: Métricas não aparecem no CloudWatch
+```bash
+# Métricas customizadas não são exibidas
+```
+
+#### ✅ **Solução**:
+```javascript
+// Adicionar métricas customizadas
+const AWS = require('aws-sdk');
+const cloudwatch = new AWS.CloudWatch();
+
+await cloudwatch.putMetricData({
+    Namespace: 'TasksAPI',
+    MetricData: [{
+        MetricName: 'TasksCreated',
+        Value: 1,
+        Unit: 'Count'
+    }]
+}).promise();
+```
+
+## 🔍 Comandos de Debugging
+
+### Verificar Status dos Recursos
+
+```bash
+# Status da função Lambda
+aws lambda get-function --function-name createTask
+
+# Status da API Gateway
+aws apigateway get-rest-api --rest-api-id $API_ID
+
+# Status da tabela DynamoDB
+aws dynamodb describe-table --table-name Tasks
+
+# Listar log groups
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/
+```
+
+### Testar Funções Localmente
+
+```bash
+# Testar função Lambda localmente
+aws lambda invoke \
+    --function-name createTask \
+    --payload '{"body": "{\"title\":\"Test\",\"description\":\"Test task\"}"}' \
+    response.json
+
+cat response.json
+```
+
+### Monitorar Logs em Tempo Real
+
+```bash
+# Seguir logs da função
+aws logs tail /aws/lambda/createTask --follow
+
+# Filtrar logs por erro
+aws logs filter-log-events \
+    --log-group-name /aws/lambda/createTask \
+    --filter-pattern "ERROR"
+```
+
+## 📊 Métricas Importantes
+
+### Lambda Metrics
+- **Invocations**: Número de execuções
+- **Errors**: Número de erros
+- **Duration**: Tempo de execução
+- **Throttles**: Execuções limitadas
+- **ConcurrentExecutions**: Execuções simultâneas
+
+### API Gateway Metrics
+- **Count**: Número de requests
+- **Latency**: Latência das requests
+- **4XXError**: Erros do cliente
+- **5XXError**: Erros do servidor
+- **IntegrationLatency**: Latência da integração
+
+## 🛠️ Ferramentas de Debug
+
+### AWS CLI
+```bash
+# Verificar configuração
+aws configure list
+
+# Testar credenciais
+aws sts get-caller-identity
+```
+
+### AWS SAM (Serverless Application Model)
+```bash
+# Instalar SAM CLI
+pip install aws-sam-cli
+
+# Testar função localmente
+sam local invoke createTask -e event.json
+```
+
+### Postman/Insomnia
+- Testar endpoints da API
+- Verificar headers e responses
+- Automatizar testes
+
+## 📋 Checklist de Troubleshooting
+
+### Antes de Reportar Problema:
+
+- [ ] Verificar logs no CloudWatch
+- [ ] Confirmar permissões IAM
+- [ ] Testar função isoladamente
+- [ ] Verificar configuração da API Gateway
+- [ ] Confirmar existência dos recursos (tabela, função)
+- [ ] Testar com dados simples
+- [ ] Verificar região AWS
+- [ ] Confirmar limites de conta AWS
+
+### Informações para Suporte:
+
+1. **Request ID** da execução
+2. **Logs completos** do CloudWatch
+3. **Configuração** da função/API
+4. **Payload** de teste usado
+5. **Região** AWS utilizada
+6. **Timestamp** do erro
 
 ---
 
-**Desenvolvido por:** Professor Alexandre Tavares - UniFAAT
+**Lembre-se**: A maioria dos problemas serverless são relacionados a permissões IAM ou configuração incorreta. Sempre verifique esses pontos primeiro! 🔧

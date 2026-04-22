@@ -1,341 +1,529 @@
-# Troubleshooting Lab 15 - Projeto Final E-commerce
+# Lab015-Troubleshooting - Pipeline CI/CD Completo
 
-**Lab:** 015 - Projeto Final E-commerce  
-**Foco:** Integração completa, arquitetura AWS, troubleshooting avançado
+**Disciplina:** Implementação de Sistemas  
+**Curso:** Análise e Desenvolvimento de Sistemas - UniFAAT  
+**Professor:** Alexandre Tavares  
 
----
+## 🚨 Problemas Comuns e Soluções
 
-## 🚨 Problemas Mais Comuns
+### 1. Problemas de GitHub Actions
 
-### 1. Arquitetura Completa não Funciona
-
-#### **Sintoma:**
-- Componentes isolados funcionam, mas integração falha
-- Load Balancer não encontra targets
-- Frontend não conecta com backend
-
-#### **Diagnóstico:**
-```bash
-# Verifica todos os componentes
-aws elbv2 describe-target-health --target-group-arn arn:aws:elasticloadbalancing:...
-aws rds describe-db-instances --db-instance-identifier ecommerce-db
-aws s3 ls s3://ecommerce-frontend
-aws cloudfront list-distributions
+#### ❌ **Problema**: Workflow não executa após push
+```
+No workflow runs triggered
 ```
 
-#### **Soluções:**
-```bash
-# Verifica conectividade entre componentes
-# EC2 → RDS
-mysql -h ecommerce-db.cluster-xyz.us-east-1.rds.amazonaws.com -u admin -p
+#### ✅ **Solução**:
+```yaml
+# Verificar se o arquivo está no local correto
+.github/workflows/ci.yml
 
-# Frontend → Backend via ALB
-curl https://api.meusite.com/health
+# Verificar sintaxe YAML
+on:
+  push:
+    branches: [main, develop]  # Verificar nome das branches
+  pull_request:
+    branches: [main]
 
-# Verifica Security Groups
-aws ec2 describe-security-groups --group-ids sg-backend sg-database sg-alb
+# Verificar se há erros de sintaxe
+name: "CI Pipeline"  # Nome deve estar entre aspas se contém espaços
 ```
 
-### 2. Auto Scaling não Responde à Carga
-
-#### **Sintoma:**
-- CPU alta mas novas instâncias não são criadas
-- Instâncias criadas mas não recebem tráfego
-
-#### **Soluções:**
 ```bash
-# Verifica políticas de scaling
-aws autoscaling describe-policies --auto-scaling-group-name ecommerce-asg
+# Validar YAML localmente
+yamllint .github/workflows/ci.yml
 
-# Força scaling para teste
-aws autoscaling set-desired-capacity \
-  --auto-scaling-group-name ecommerce-asg \
-  --desired-capacity 3
-
-# Verifica alarmes CloudWatch
-aws cloudwatch describe-alarms --alarm-names cpu-high-ecommerce
-
-# Testa health check das novas instâncias
-curl -I http://nova-instancia-ip/health
+# Verificar logs do GitHub Actions
+# GitHub → Repository → Actions → Workflow runs
 ```
 
-### 3. Banco de Dados com Performance Ruim
-
-#### **Sintoma:**
-- Queries lentas
-- Timeouts de conexão
-- CPU do RDS em 100%
-
-#### **Diagnóstico:**
-```bash
-# Verifica métricas RDS
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/RDS \
-  --metric-name CPUUtilization \
-  --dimensions Name=DBInstanceIdentifier,Value=ecommerce-db \
-  --start-time 2024-01-01T00:00:00Z \
-  --end-time 2024-01-01T23:59:59Z \
-  --period 300 \
-  --statistics Average,Maximum
-
-# Verifica conexões ativas
-mysql -h endpoint -u admin -p -e "SHOW PROCESSLIST;"
+#### ❌ **Problema**: Job falha com "Permission denied"
+```
+Error: Permission denied (publickey)
 ```
 
-#### **Soluções:**
-```bash
-# Otimiza queries
-mysql -h endpoint -u admin -p -e "
-  EXPLAIN SELECT * FROM produtos WHERE categoria = 'eletrônicos';
-  CREATE INDEX idx_categoria ON produtos(categoria);
-"
+#### ✅ **Solução**:
+```yaml
+# Verificar se secrets estão configurados
+steps:
+  - name: Configure AWS credentials
+    uses: aws-actions/configure-aws-credentials@v2
+    with:
+      aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      aws-region: us-east-1
 
-# Implementa connection pooling no backend
-# Exemplo Node.js:
-cat << EOF > db-pool.js
-const mysql = require('mysql2');
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  connectionLimit: 10,
-  acquireTimeout: 60000,
-  timeout: 60000
+# Verificar permissões do token GitHub
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+```
+
+### 2. Problemas de Build e Testes
+
+#### ❌ **Problema**: Testes falhando no CI mas passando localmente
+```
+Tests pass locally but fail in CI
+```
+
+#### ✅ **Solução**:
+```yaml
+# Garantir mesmo ambiente Node.js
+- name: Setup Node.js
+  uses: actions/setup-node@v3
+  with:
+    node-version: '18'  # Mesma versão local
+    cache: 'npm'
+
+# Usar npm ci em vez de npm install
+- name: Install dependencies
+  run: npm ci  # Instala exatamente o que está no package-lock.json
+
+# Configurar variáveis de ambiente
+env:
+  NODE_ENV: test
+  CI: true
+```
+
+```javascript
+// Ajustar testes para ambiente CI
+describe('API Tests', () => {
+  beforeAll(async () => {
+    // Aguardar serviços estarem prontos
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  });
+
+  it('should handle timeout in CI', async () => {
+    // Aumentar timeout para CI
+    const timeout = process.env.CI ? 10000 : 5000;
+    // ... test code
+  }, 15000); // Timeout maior para CI
 });
-module.exports = pool.promise();
-EOF
-
-# Upgrade da instância RDS se necessário
-aws rds modify-db-instance \
-  --db-instance-identifier ecommerce-db \
-  --db-instance-class db.t3.medium \
-  --apply-immediately
 ```
 
-### 4. CloudFront Cache Issues
-
-#### **Sintoma:**
-- Mudanças no frontend não aparecem
-- API calls sendo cacheadas incorretamente
-
-#### **Soluções:**
-```bash
-# Configura cache behaviors corretos
-aws cloudfront update-distribution \
-  --id E1234567890ABC \
-  --distribution-config '{
-    "CallerReference": "ecommerce-'$(date +%s)'",
-    "DefaultCacheBehavior": {
-      "TargetOriginId": "S3-ecommerce-frontend",
-      "ViewerProtocolPolicy": "redirect-to-https",
-      "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
-      "Compress": true
-    },
-    "CacheBehaviors": {
-      "Items": [{
-        "PathPattern": "/api/*",
-        "TargetOriginId": "ALB-ecommerce-backend",
-        "ViewerProtocolPolicy": "https-only",
-        "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
-        "TTL": 0
-      }]
-    }
-  }'
-
-# Invalida cache quando necessário
-aws cloudfront create-invalidation \
-  --distribution-id E1234567890ABC \
-  --paths "/index.html" "/static/js/*" "/static/css/*"
+#### ❌ **Problema**: Build Docker falha por falta de memória
+```
+Error: Docker build failed - out of memory
 ```
 
-### 5. Monitoramento Insuficiente
+#### ✅ **Solução**:
+```yaml
+# Usar multi-stage build para reduzir tamanho
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
 
-#### **Sintoma:**
-- Não detecta problemas rapidamente
-- Alertas não disparam
-- Logs não são coletados
+FROM node:18-alpine
+WORKDIR /app
+COPY --from=builder /app/node_modules ./node_modules
+COPY . .
 
-#### **Soluções:**
-```bash
-# Configura alarmes essenciais
-aws cloudwatch put-metric-alarm \
-  --alarm-name "ECommerce-HighErrorRate" \
-  --alarm-description "High error rate in ALB" \
-  --metric-name HTTPCode_Target_5XX_Count \
-  --namespace AWS/ApplicationELB \
-  --statistic Sum \
-  --period 300 \
-  --threshold 10 \
-  --comparison-operator GreaterThanThreshold \
-  --evaluation-periods 2 \
-  --alarm-actions arn:aws:sns:us-east-1:123456789012:ecommerce-alerts
+# Configurar Docker Buildx com mais memória
+- name: Set up Docker Buildx
+  uses: docker/setup-buildx-action@v2
+  with:
+    driver-opts: |
+      image=moby/buildkit:latest
+      network=host
 
-# Configura logs estruturados no backend
-cat << EOF > logger.js
-const winston = require('winston');
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.Console(),
-    new winston.transports.File({ filename: '/var/log/ecommerce/app.log' })
-  ]
-});
-module.exports = logger;
-EOF
-
-# Envia logs para CloudWatch
-sudo tee -a /etc/awslogs/awslogs.conf << EOF
-[/var/log/ecommerce/app.log]
-datetime_format = %Y-%m-%d %H:%M:%S
-file = /var/log/ecommerce/app.log
-buffer_duration = 5000
-log_stream_name = {instance_id}/ecommerce/app.log
-initial_position = start_of_file
-log_group_name = /aws/ec2/ecommerce
-EOF
+# Usar cache para acelerar builds
+- name: Build and push
+  uses: docker/build-push-action@v4
+  with:
+    context: .
+    push: true
+    tags: myapp:latest
+    cache-from: type=gha
+    cache-to: type=gha,mode=max
 ```
 
-### 6. Segurança Vulnerável
+### 3. Problemas de Deploy AWS
 
-#### **Sintoma:**
-- Security Groups muito permissivos
-- Dados sensíveis em logs
-- HTTPS não funcionando
-
-#### **Soluções:**
-```bash
-# Revisa Security Groups
-aws ec2 describe-security-groups --group-ids sg-ecommerce-web \
-  --query 'SecurityGroups[0].IpPermissions[?IpRanges[?CidrIp==`0.0.0.0/0`]]'
-
-# Corrige regras muito abertas
-aws ec2 revoke-security-group-ingress \
-  --group-id sg-ecommerce-web \
-  --protocol tcp \
-  --port 22 \
-  --cidr 0.0.0.0/0
-
-aws ec2 authorize-security-group-ingress \
-  --group-id sg-ecommerce-web \
-  --protocol tcp \
-  --port 22 \
-  --cidr 10.0.0.0/8
-
-# Usa Secrets Manager para credenciais
-aws secretsmanager create-secret \
-  --name ecommerce/database \
-  --description "Database credentials for ecommerce" \
-  --secret-string '{"username":"admin","password":"secure-password"}'
-
-# Atualiza aplicação para usar secrets
-cat << EOF > get-secret.js
-const AWS = require('aws-sdk');
-const secretsManager = new AWS.SecretsManager();
-
-async function getDatabaseCredentials() {
-  const secret = await secretsManager.getSecretValue({
-    SecretId: 'ecommerce/database'
-  }).promise();
-  return JSON.parse(secret.SecretString);
-}
-EOF
+#### ❌ **Problema**: Deploy ECS falha com "Service not found"
+```
+Error: Service 'myapp-service' not found in cluster 'my-cluster'
 ```
 
-### 7. Backup e Disaster Recovery
-
-#### **Sintoma:**
-- Sem estratégia de backup
-- Recovery time muito alto
-- Dados perdidos
-
-#### **Soluções:**
+#### ✅ **Solução**:
 ```bash
-# Configura backup automático RDS
-aws rds modify-db-instance \
-  --db-instance-identifier ecommerce-db \
-  --backup-retention-period 7 \
-  --preferred-backup-window "03:00-04:00" \
-  --preferred-maintenance-window "sun:04:00-sun:05:00"
+# Verificar se cluster e service existem
+aws ecs describe-clusters --clusters my-cluster
+aws ecs describe-services --cluster my-cluster --services myapp-service
 
-# Backup do S3 para outra região
-aws s3api put-bucket-replication \
-  --bucket ecommerce-frontend \
-  --replication-configuration '{
-    "Role": "arn:aws:iam::123456789012:role/replication-role",
-    "Rules": [{
-      "Status": "Enabled",
-      "Prefix": "",
-      "Destination": {
-        "Bucket": "arn:aws:s3:::ecommerce-frontend-backup",
-        "StorageClass": "STANDARD_IA"
+# Criar service se não existir
+aws ecs create-service \
+  --cluster my-cluster \
+  --service-name myapp-service \
+  --task-definition myapp:1 \
+  --desired-count 1
+
+# Verificar task definition
+aws ecs describe-task-definition --task-definition myapp
+```
+
+```yaml
+# Workflow com verificação
+- name: Check if service exists
+  run: |
+    if ! aws ecs describe-services --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }} --query 'services[0].serviceName' --output text; then
+      echo "Service does not exist, creating..."
+      aws ecs create-service \
+        --cluster ${{ env.ECS_CLUSTER }} \
+        --service-name ${{ env.ECS_SERVICE }} \
+        --task-definition ${{ env.TASK_DEFINITION }} \
+        --desired-count 1
+    fi
+```
+
+#### ❌ **Problema**: Task definition inválida
+```
+Error: Invalid task definition
+```
+
+#### ✅ **Solução**:
+```json
+{
+  "family": "myapp",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "myapp",
+      "image": "myapp:latest",
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/myapp",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
       }
-    }]
-  }'
-
-# Snapshot das instâncias EC2
-aws ec2 create-snapshot \
-  --volume-id vol-1234567890abcdef0 \
-  --description "Ecommerce app backup $(date)"
-
-# Testa procedimento de recovery
-# 1. Cria nova instância RDS de snapshot
-# 2. Atualiza DNS para ambiente de backup
-# 3. Verifica funcionamento completo
-```
-
-### 8. Performance End-to-End
-
-#### **Sintoma:**
-- Site lento para usuários finais
-- Timeouts intermitentes
-- Experiência ruim no mobile
-
-#### **Soluções:**
-```bash
-# Otimiza CloudFront
-aws cloudfront update-distribution \
-  --id E1234567890ABC \
-  --distribution-config '{
-    "PriceClass": "PriceClass_All",
-    "HttpVersion": "http2",
-    "IsIPV6Enabled": true,
-    "DefaultCacheBehavior": {
-      "Compress": true,
-      "ViewerProtocolPolicy": "redirect-to-https"
     }
-  }'
-
-# Implementa CDN para assets estáticos
-# Move imagens para S3 + CloudFront
-aws s3 sync ./images s3://ecommerce-assets/images/
-aws cloudfront create-invalidation \
-  --distribution-id E1234567890ABC \
-  --paths "/images/*"
-
-# Otimiza queries do banco
-mysql -h endpoint -u admin -p << EOF
--- Adiciona índices para queries frequentes
-CREATE INDEX idx_produto_categoria ON produtos(categoria);
-CREATE INDEX idx_produto_preco ON produtos(preco);
-CREATE INDEX idx_pedido_data ON pedidos(data_pedido);
-
--- Otimiza query de produtos em destaque
-EXPLAIN SELECT * FROM produtos 
-WHERE categoria = 'eletrônicos' 
-AND preco BETWEEN 100 AND 1000 
-ORDER BY vendas DESC 
-LIMIT 10;
-EOF
-
-# Implementa cache Redis (opcional)
-# Para sessões e dados frequentemente acessados
+  ]
+}
 ```
+
+### 4. Problemas de Secrets e Variáveis
+
+#### ❌ **Problema**: Secret não encontrado
+```
+Error: Secret AWS_ACCESS_KEY_ID not found
+```
+
+#### ✅ **Solução**:
+```bash
+# Verificar se secrets estão configurados no GitHub
+# Repository → Settings → Secrets and variables → Actions
+
+# Adicionar secrets necessários:
+# AWS_ACCESS_KEY_ID
+# AWS_SECRET_ACCESS_KEY
+# ECR_REGISTRY
+# SLACK_WEBHOOK
+```
+
+```yaml
+# Verificar se secret existe antes de usar
+- name: Check secrets
+  run: |
+    if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+      echo "AWS_ACCESS_KEY_ID secret not set"
+      exit 1
+    fi
+```
+
+#### ❌ **Problema**: Variável de ambiente não disponível
+```
+Error: Environment variable not set
+```
+
+#### ✅ **Solução**:
+```yaml
+# Definir variáveis no nível correto
+env:
+  NODE_ENV: production
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    env:
+      ECS_CLUSTER: my-cluster
+    steps:
+      - name: Deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: ./deploy.sh
+```
+
+### 5. Problemas de Dependências
+
+#### ❌ **Problema**: Dependência não encontrada
+```
+Error: Module 'some-package' not found
+```
+
+#### ✅ **Solução**:
+```yaml
+# Usar cache para dependências
+- name: Setup Node.js
+  uses: actions/setup-node@v3
+  with:
+    node-version: '18'
+    cache: 'npm'
+    cache-dependency-path: '**/package-lock.json'
+
+# Limpar cache se necessário
+- name: Clear npm cache
+  run: npm cache clean --force
+
+# Verificar package-lock.json está commitado
+- name: Verify package-lock
+  run: |
+    if [ ! -f package-lock.json ]; then
+      echo "package-lock.json not found"
+      exit 1
+    fi
+```
+
+#### ❌ **Problema**: Versões conflitantes
+```
+Error: Conflicting peer dependencies
+```
+
+#### ✅ **Solução**:
+```json
+// package.json - definir versões específicas
+{
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "express": "^4.18.0"
+  }
+}
+```
+
+```yaml
+# Verificar versões no workflow
+- name: Check versions
+  run: |
+    node --version
+    npm --version
+    echo "Expected Node: 18.x"
+```
+
+### 6. Problemas de Rede e Conectividade
+
+#### ❌ **Problema**: Timeout conectando com AWS
+```
+Error: Connection timeout to AWS services
+```
+
+#### ✅ **Solução**:
+```yaml
+# Aumentar timeout para operações AWS
+- name: Deploy with retry
+  run: |
+    for i in {1..3}; do
+      if aws ecs update-service \
+        --cluster ${{ env.ECS_CLUSTER }} \
+        --service ${{ env.ECS_SERVICE }} \
+        --task-definition ${{ env.TASK_DEFINITION }}; then
+        break
+      else
+        echo "Attempt $i failed, retrying..."
+        sleep 30
+      fi
+    done
+
+# Configurar região AWS explicitamente
+- name: Configure AWS credentials
+  uses: aws-actions/configure-aws-credentials@v2
+  with:
+    aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+    aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    aws-region: us-east-1
+    aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+```
+
+#### ❌ **Problema**: Health check falhando
+```
+Error: Health check failed after deployment
+```
+
+#### ✅ **Solução**:
+```yaml
+- name: Wait for deployment
+  run: |
+    echo "Waiting for service to stabilize..."
+    aws ecs wait services-stable \
+      --cluster ${{ env.ECS_CLUSTER }} \
+      --services ${{ env.ECS_SERVICE }}
+
+- name: Health check with retry
+  run: |
+    for i in {1..10}; do
+      if curl -f https://myapp.com/health; then
+        echo "Health check passed"
+        break
+      else
+        echo "Health check failed, attempt $i/10"
+        if [ $i -eq 10 ]; then
+          echo "Health check failed after 10 attempts"
+          exit 1
+        fi
+        sleep 30
+      fi
+    done
+```
+
+## 🔍 Comandos de Debugging
+
+### Verificar Status dos Recursos
+
+```bash
+# Status do workflow
+gh run list --repo owner/repo
+
+# Logs do workflow
+gh run view RUN_ID --log
+
+# Status ECS
+aws ecs describe-services --cluster my-cluster --services my-service
+
+# Logs do container
+aws logs tail /ecs/myapp --follow
+
+# Status do Load Balancer
+aws elbv2 describe-target-health --target-group-arn arn:aws:elasticloadbalancing:...
+```
+
+### Testar Localmente
+
+```bash
+# Testar Docker build
+docker build -t myapp .
+docker run -p 3000:3000 myapp
+
+# Testar com docker-compose
+docker-compose up --build
+
+# Simular ambiente CI
+export CI=true
+export NODE_ENV=test
+npm ci
+npm test
+```
+
+### Validar Configurações
+
+```bash
+# Validar YAML
+yamllint .github/workflows/ci.yml
+
+# Validar task definition
+aws ecs validate-task-definition --cli-input-json file://task-definition.json
+
+# Testar AWS credentials
+aws sts get-caller-identity
+```
+
+## 📊 Métricas de Pipeline
+
+### Métricas Importantes:
+- **Build Time**: Tempo total do pipeline
+- **Test Coverage**: Cobertura de testes
+- **Success Rate**: Taxa de sucesso dos deploys
+- **Mean Time to Recovery**: Tempo médio para recuperação
+- **Deployment Frequency**: Frequência de deploys
+
+### Monitoramento:
+```yaml
+- name: Collect metrics
+  run: |
+    echo "build_duration=${{ steps.build.outputs.duration }}" >> $GITHUB_OUTPUT
+    echo "test_coverage=${{ steps.test.outputs.coverage }}" >> $GITHUB_OUTPUT
+    echo "deployment_time=$(date +%s)" >> $GITHUB_OUTPUT
+```
+
+## 🛠️ Ferramentas de Debug
+
+### GitHub CLI
+```bash
+# Instalar GitHub CLI
+gh auth login
+
+# Ver runs recentes
+gh run list
+
+# Ver logs de um run específico
+gh run view 123456789 --log
+
+# Re-executar workflow
+gh run rerun 123456789
+```
+
+### AWS CLI Debug
+```bash
+# Habilitar debug
+export AWS_CLI_FILE_ENCODING=UTF-8
+aws --debug ecs describe-services --cluster my-cluster --services my-service
+
+# Verificar credenciais
+aws sts get-caller-identity
+
+# Testar conectividade
+aws sts get-caller-identity --region us-east-1
+```
+
+### Docker Debug
+```bash
+# Ver logs do container
+docker logs container-id
+
+# Executar shell no container
+docker exec -it container-id /bin/sh
+
+# Inspecionar imagem
+docker inspect image-name
+```
+
+## 📋 Checklist de Troubleshooting
+
+### Antes de Reportar Problema:
+
+- [ ] Verificar logs do GitHub Actions
+- [ ] Confirmar secrets configurados
+- [ ] Testar build localmente
+- [ ] Verificar sintaxe YAML
+- [ ] Confirmar recursos AWS existem
+- [ ] Testar credenciais AWS
+- [ ] Verificar conectividade de rede
+- [ ] Confirmar versões de dependências
+
+### Informações para Suporte:
+
+1. **Run ID** do GitHub Actions
+2. **Logs completos** do workflow
+3. **Configuração** do workflow (YAML)
+4. **Recursos AWS** envolvidos
+5. **Mensagens de erro** específicas
+6. **Ambiente** (staging/production)
 
 ---
 
-**Desenvolvido por:** Professor Alexandre Tavares - UniFAAT
+**Lembre-se**: Pipelines CI/CD são sobre automação confiável. Sempre teste mudanças em ambiente de desenvolvimento primeiro! 🔧
