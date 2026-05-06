@@ -1,2 +1,5 @@
 #!/bin/bash
-echo "Remover EC2, VPC e Security Groups"
+echo "Remover manualmente recursos AWS:"
+echo "- EC2"
+echo "- VPC"
+echo "- Security Groups"
