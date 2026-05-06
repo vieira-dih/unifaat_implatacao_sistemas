@@ -1,0 +1,3 @@
+- Princípio do menor privilégio aplicado
+- Banco não exposto publicamente
+- SSH restrito

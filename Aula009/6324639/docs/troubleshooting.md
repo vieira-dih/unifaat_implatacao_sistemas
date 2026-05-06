@@ -1,0 +1,2 @@
+- SSH não conecta → verificar IP
+- Porta 80 não abre → verificar SG
